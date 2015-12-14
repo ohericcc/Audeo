@@ -1,0 +1,391 @@
+#!/usr/bin/python
+# -*- encoding: utf-8 -*-
+# Program for downloading a song
+
+import os
+import eyed3
+import sys
+import argparse
+import requests
+import getopt
+import time
+import re
+import urllib
+import urllib2
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC 
+
+class Song :
+	def __init__(self, args, command_args):
+		self.command_args = command_args
+		self.args = args
+		self.title = ""
+		self.artist = ""
+		self.album_name = ""
+		self.album_img_url = ""
+		self.lyrics = ""
+		self.dl_url = ""
+		self.filepath = "/Users/sehun/Music/file.mp3"
+		self.rg_attributes_found = False
+
+	def set_yt_results(self,results) :
+		self.yt_result = results
+
+	def set_sc_results(self,results) :
+		self.sc_results = results
+
+class YouTubeVideoResult : 
+	def __init__(self,title,length,poster,url) :
+		self.title = title
+		self.length = length
+		self.poster = poster
+		self.url = url		
+
+class SoundCloudResult:
+	def __init__(self,title,poster,url) :
+		self.title = title
+		self.poster = poster
+		self.url = url
+
+def setID3Tags(song):
+	print "PROCESS: Setting mp3 file attributes"
+	hdr = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.11 (KHTML, like Gecko) Chrome/23.0.1271.64 Safari/537.11', 
+		'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+       	'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.3',
+       	'Accept-Encoding': 'none',
+       	'Accept-Language': 'en-US,en;q=0.8',
+       	'Connection': 'keep-alive'
+	}
+	response = requests.get(song.album_img_url, headers=hdr).content
+	imagedata = response
+	audiofile = eyed3.load(song.filepath)
+	audiofile.initTag()
+	audiofile.tag.title = u"%s" % song.title 
+	audiofile.tag.artist = u"%s" % song.artist
+	if song.album_name == "" :
+		song.album_name = "Unknown_" + song.artist
+	audiofile.tag.album = u"%s" % song.album_name
+	audiofile.tag.lyrics.set(u"%s" % song.lyrics)
+	if song.album_img_url != "" :	
+		audiofile.tag.images.set(3,imagedata,"image/jpeg",u"Album Art")
+	audiofile.tag.save()
+	os.rename(song.filepath,(song.filepath.rsplit("/",1)[0] + "/" + " - ".join([song.title, song.artist])+'.mp3'))
+
+def parse_yt_results_page(song,interactive_option): 
+	print "PROCESS: Parsing YouTube Results Page"
+	hdr = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.11 (KHTML, like Gecko) Chrome/23.0.1271.64 Safari/537.11', 
+		'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+       	'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.3',
+       	'Accept-Encoding': 'none',
+       	'Accept-Language': 'en-US,en;q=0.8',
+       	'Connection': 'keep-alive'
+	}
+	html = requests.get('http://www.youtube.com/results',params={'search_query': " ".join(song.args)},headers=hdr)
+	soup = BeautifulSoup(html.text,"lxml")
+	youtube_results = []
+	result_list = soup.find('ol','section-list')
+	for video_result in result_list.find_all('div', {"class": ["yt-lockup-video"]}) :
+		length = re.split("'", str(video_result.find_all('span', {"class": ["video-time"]})[0].contents))[1]
+		title = str(video_result.find_all('div', {"class": ["yt-lockup-content"]})[0].a.contents)[3:-2]
+		url = "http://www.youtube.com" + video_result.find_all('div', {"class": ["yt-lockup-content"]})[0].a['href']
+		poster = str(video_result.find_all('a',{"class":["g-hovercard"]})[0].contents)[3:-2]
+		youtube_results.append(YouTubeVideoResult(title,time,poster,url))
+	song.set_yt_results(youtube_results)
+	if interactive_option:
+		print " --- Displaying Top YouTube Video Results --- "
+		for i in range(0,5) :
+			print str(i+1) + ") " + youtube_results[i].title
+			if "VEVO" in youtube_results[i].poster :
+				print "	" + "CAUTION: Posted by VEVO"
+		print 
+		while True:
+			user_input = raw_input("Enter choice: ")
+			try:
+				if int(user_input) > 0 and int(user_input) < 6 :
+					break
+				else :
+					print "Please enter valid choice between 1-5"
+			except ValueError:
+				print "Please enter integer value"
+		song.dl_url = youtube_results[int(user_input)-1].url
+	else: 
+		for video in youtube_results :
+			if "VEVO" in video.poster :
+				pass
+			elif "live" in video.title.lower() :
+				pass
+			elif "parody" in video.title.lower() :
+				pass
+			elif "cover" in video.title.lower() :
+				pass
+			elif "lyric" in video.title.lower() :
+				song.dl_url = video.url
+				break
+
+def parse_sc_results_page(song): 
+	print "PROCESS: Parsing SoundCloud Results Page"
+	hdr = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.11 (KHTML, like Gecko) Chrome/23.0.1271.64 Safari/537.11', 
+		'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+       	'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.3',
+       	'Accept-Encoding': 'none',
+       	'Accept-Language': 'en-US,en;q=0.8',
+       	'Connection': 'keep-alive'
+	}
+	sc_results = []
+	html = requests.get('https://soundcloud.com/search?q=' + "%20".join(song.args),headers=hdr)
+	soup = BeautifulSoup(html.text,"lxml")
+	try: 
+		for result in soup.find_all('h2'):
+			link = result.a['href']
+			song_title = str(result.a.contents)[3:-2]
+			profile = re.split("/",str(link))[1]
+			sc_results.append(SoundCloudResult(song_title,profile,"http://www.soundcloud.com"+link))
+		print " --- Displaying Top SoundCloud Results --- "
+		for i in range(0,5) :
+			print str(i+1) + ") " + sc_results[i].title + " [posted by] " + sc_results[i].poster 
+		while True:
+			user_input = raw_input("Enter choice: ")
+			try:
+				if int(user_input) > 0 and int(user_input) < 6 :
+					break
+				else :
+					print "Please enter valid choice between 1-5"
+			except ValueError:
+				print "Please enter integer value"
+	except :
+		print "No results were found. Please try a different search query."
+		sys.exit()
+	song.set_sc_results(sc_results)
+	song.dl_url = sc_results[int(user_input)-1].url
+	song.title = sc_results[int(user_input)-1].title
+	song.artist = sc_results[int(user_input)-1].poster
+	browser = webdriver.Chrome()
+	browser.get(song.dl_url)
+	song.album_img_url = browser.find_elements_by_css_selector('meta[property="twitter:image:src"]')[0].get_attribute('content')
+	browser.close()
+	browser.quit()
+
+def get_lyrics(song):
+	print "PROCESS: Getting Lyrics"
+	hdr = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.11 (KHTML, like Gecko) Chrome/23.0.1271.64 Safari/537.11', 
+		'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+       	'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.3',
+       	'Accept-Encoding': 'none',
+       	'Accept-Language': 'en-US,en;q=0.8',
+       	'Connection': 'keep-alive'
+	}
+	browser = webdriver.Chrome()
+	browser.get("http://www.genius.com/search?q="+"+".join(song.args))
+	wait = WebDriverWait(browser,10)
+	try :
+		result = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR,'ul.search_results.song_list.primary_list li')))
+		result.click()
+
+	# 	RESULT VALIDATION FROM RAPGENIUS	
+	# soup = BeautifulSoup(browser.page_source, 'lxml')
+	# wait.until(EC.presence_of_element_located((By.CSS_SELECTOR,'ul.search_results.song_list.primary_list')))
+	# li_results = soup.find_all('li', {"class": ["search_result"]})
+	# arg_found_in_title = False
+	# title = ""
+	# for l in li_results : 
+	# 	while True :
+	# 		for a in song.args :
+	# 			if a in l.a['title'].lower() :
+	# 				arg_found_in_title = True
+	# 				title = l.a['title']
+	# 				break
+	# 			else :
+	# 				pass
+	# 		break
+	# 	if arg_found_in_title :
+	# 		break
+	# browser.find_element_by_css_selector('li.search_result a[title="%s"]' % title).click()
+
+		soup = BeautifulSoup(browser.page_source, 'lxml')
+		lyrics = ""
+		for element in soup.find_all('div',{"class":["lyrics"]})[0] :
+			nextNode = element
+			while True:
+				nextNode = nextNode.nextSibling
+				try:
+					tag_name = nextNode.name
+				except AttributeError:
+					tag_name = ""
+				if tag_name == 'p' or tag_name == 'a' :
+					lyrics += nextNode.text + "\n"
+				else :
+					break
+		song.lyrics = lyrics
+	except :
+		print "(ノಠ益ಠ)ノ 	Lyrics not found on Rap Genius... sorry!"
+		print "|⁰⊖⁰) 		Are you sure this is a song? lmaojk ♡"
+	
+	# set song name and artist through rapgenius
+	try :
+		t_and_a = browser.find_element_by_css_selector('h1.title_and_authors')
+		song.title = t_and_a.find_element_by_css_selector('span.text_title').text 
+		song.artist = t_and_a.find_element_by_css_selector('span.text_artist a').text
+	except:
+		print "Song was not found"
+
+	# set album name and image through rapgenius
+	if song.command_args.package :
+		print "PROCESS: Finding album name and artwork from Rap Genius"
+		try :
+			browser.find_element_by_css_selector('div.collection a.collection_title').click()
+			wait = WebDriverWait(browser,10)
+			song.album_name = re.split("\n",wait.until(EC.presence_of_element_located((By.CSS_SELECTOR,'h1.album_name'))).text)[0]
+			song.album_img_url = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR,'img.cover_art'))).get_attribute('src')
+			song.rg_attributes_found = True
+		except :
+			song.rg_attributes_found = False
+	browser.close()
+	browser.quit()
+
+def download_mp3(song):
+	print "PROCESS: Downloading mp3 file"
+	hdr = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.11 (KHTML, like Gecko) Chrome/23.0.1271.64 Safari/537.11', 
+		'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+       	'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.3',
+       	'Accept-Encoding': 'none',
+       	'Accept-Language': 'en-US,en;q=0.8',
+       	'Connection': 'keep-alive'
+   	}
+	browser = webdriver.Chrome()  
+	browser.get('http://www.anything2mp3.com')  
+	browser.find_element_by_id("edit-url").send_keys(song.dl_url)
+	browser.find_element_by_id("edit-submit--2").click()
+	wait = WebDriverWait(browser, 20)
+	#put try except here somewhere
+	download_click_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR,'div.block.block-system.no-title a')))
+	download_link = download_click_element.get_attribute('href')
+   	req = urllib2.Request(download_link, headers=hdr)
+   	mp3file = urllib2.urlopen(req)
+	output = open(song.filepath,'wb')
+	output.write(mp3file.read())
+	output.close()
+	browser.close()
+	browser.quit()
+
+def find_album_artwork_name(song):
+	if not song.rg_attributes_found :
+		print "PROCESS: Finding album name and artwork from Google"
+		hdr = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.11 (KHTML, like Gecko) Chrome/23.0.1271.64 Safari/537.11', 
+			'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+	       	'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.3',
+	       	'Accept-Encoding': 'none',
+	       	'Accept-Language': 'en-US,en;q=0.8',
+	       	'Connection': 'keep-alive'
+		}
+		browser = webdriver.Chrome()
+		browser.get('https://www.google.com')
+		search_box = browser.find_element_by_name('q')
+		for word in song.args :
+			search_box.send_keys(word + " ")
+		search_box.send_keys('album')
+		browser.find_element_by_css_selector('button.lsb').click()
+		wait = WebDriverWait(browser, 10)
+		try :
+			album_attributes_box = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR,'div._OKe')))
+			song.album_name = browser.find_element_by_css_selector('div._eF').text
+			browser.find_element_by_css_selector('a.bia.uh_rl').click()
+			WebDriverWait(browser, 10)
+			song.album_img_url = browser.find_elements_by_css_selector('meta')[0].get_attribute('content')
+		except :
+			print "WARNING: Failed to find album name and album artwork"
+		browser.close()
+		browser.quit()
+	else :
+		pass
+
+def main(argv):
+	parser = argparse.ArgumentParser(description='Program for downloading an mp3 file and corresponding metadata, ultimately to create a complete mp3 file containing all attributes.')
+	parser.add_argument('SONG_NAME_AND_ARTIST', nargs='*')
+	parser.add_argument('-y', '--youtube', action='store_true', help='Searches the song from YouTube')
+	parser.add_argument('-s', '--soundcloud', action='store_true', help='Searches the song from SoundCloud (Includes album artwork from SoundCloud)')
+	parser.add_argument('-p', '--package', action='store_true', help='Gets entire mp3 package, including: mp3, lyrics, album name, and album artwork. *Recommended only for well-known songs from established artists*')
+	parser.add_argument('-i', '--interactive', action='store_true', help='Interactive option. Displays all possible song download options found. (Higher accuracy)')
+	parser.add_argument('-c', '--custom-link',  help='Custom user link option, allowing for user to enter the link of the video or song')
+	parser.add_argument('-l', '--lyrics-only', action='store_true', help='Shows lyrics on screen')
+	args = parser.parse_args()
+	if not sys.argv[1:] :
+		none_args = []
+		song_name = raw_input("song name? ")
+		artist = raw_input("artist? ")
+		new_song = Song(none_args.append(song_name).append(artist).split(" "))
+		# new_song.title = song_name
+		# new_song.artist = artist
+		# print new_song.args
+		# print new_song.title
+		# print new_song.artist
+	else :
+		new_song = Song(args.SONG_NAME_AND_ARTIST, args)
+		if args.youtube and not args.package :
+			parse_yt_results_page(new_song, args.interactive)
+			download_mp3(new_song)
+			setID3Tags(new_song)
+			print "(人･㉨･)♡ Song successfully downloaded! ♡(･㉨･人)"
+		elif args.soundcloud :
+			parse_sc_results_page(new_song)	
+			download_mp3(new_song)
+			setID3Tags(new_song)
+			print "(人･㉨･)♡ Song successfully downloaded! ♡(･㉨･人)"
+		# if not args.lyrics_only : 
+		# 	download_link = parse_yt_results_page(args.SONG_NAME_AND_ARTIST, args.interactive)
+		# 	filepath = download_mp3(download_link)
+		if args.package and args.youtube :
+			parse_yt_results_page(new_song, args.interactive)
+			get_lyrics(new_song)
+			find_album_artwork_name(new_song)
+			download_mp3(new_song)
+			setID3Tags(new_song)
+			print "(人･㉨･)♡ Song successfully downloaded! ♡(･㉨･人)"
+		if args.lyrics_only :
+			get_lyrics(new_song)
+			print new_song.lyrics
+
+if __name__ == '__main__' :
+	main(sys.argv[1:])
+
+# 	FEATURES NOT YET IMPLEMENTED
+#	- interactive option for lyrics
+# 	- hypem option
+#	- song/artist name accuracy algorithm
+#	- results validation from rapgenius when song not found
+#	- album name and artwork when not found from rapg or google
+# 	- Custom link option
+#		- parsing from straight youtube/soundcloud page
+#	- soundcloud profile, keep updated
+# 	- Progress bars
+# 	- soundcloud+youtube feature
+#	- currently playing on youtube/soundcloud
+#	- GET LYRICS FOR ALBUM
+
+#	IN PROGRESS
+# 	- ***Exception catching for all attributes
+# 	- interactive mode with no arguments l0l0l this is so much work what the fuck
+
+#	MAYBE IMPLEMENT
+#	- right-click on mac os x option
+# 	- Lyrics from one more sites
+# 	- Youtube playlist, soundcloud playlist, also from person, from my profile BLAH SO MUCH WORK LOL
+#		- Parallel automation for browsers
+
+#	NOTE
+# 	- Freeing up chromedrivers    - pkill -9 chromdriver
+
+#	WHEN FINAL BUILD
+#	- Custom user directory functionalities
+#	- PhantomJS or hide browser through pythonenvy
+#	- ID3 TAG CORRECTION ALGORITHM
+#		- Implement date setter, keep getting invalid date error UGH
+
+# - list of errors seen
+#	- dsong -yp orange juice odd future
+#	- dsong -yp joey badass world domination (bada$$ error because no dollar signs lmao, also terminal says fuck u cuz no $ in terminal dude)
+# 	- interactive mode with korean doesnt show correct lettering????
+
+
